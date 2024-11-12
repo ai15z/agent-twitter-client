@@ -7,6 +7,10 @@ This is a modified version of [@the-convocation/twitter-scraper](https://github.
 npm install agent-twitter-client
 ```
 
+## Testing
+The command.ts file is made to act as a CLI for interacting with the scraper for testing
+For CLI AI agents, they can use this as well.
+
 ## Setup
 Configure environment variables for authentication.
 
