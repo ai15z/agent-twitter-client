@@ -1,12 +1,11 @@
-# agent-twitter-client
+# goat-x
 
-This is a modified version of [@the-convocation/twitter-scraper](https://github.com/the-convocation/twitter-scraper) with added functionality for sending tweets and retweets. This package does not require Twitter API to use, and will run in both the browser and server.
+This is a modified version of [@ai16z/agent-twitter-client](https://github.com/RubyResearch/agent-twitter-client) with added functionality for tweeting media (photos/videos), quote tweets, following users & liking tweets. This package does not require Twitter API to use, and will run in both the browser and server.
 
 ## Installation
 ```sh
-npm install agent-twitter-client
+npm install goat-x
 ```
-
 ## Testing
 The command.ts file is made to act as a CLI for interacting with the scraper for testing
 For CLI AI agents, they can use this as well.
