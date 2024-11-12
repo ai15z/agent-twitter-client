@@ -138,3 +138,70 @@ const latestTweet = await scraper.getLatestTweet('TwitterDev');
 // Get a specific tweet by ID
 const tweet = await scraper.getTweet('1234567890123456789');
 ```
+
+### Tweets & Engagement
+```ts
+// Send a tweet with text only
+await scraper.sendTweet('Hello world!');
+
+// Send a tweet with media (images/videos)
+const mediaId = await scraper.uploadMedia(mediaBuffer, 'image/jpeg'); // or 'video/mp4'
+await scraper.sendTweet('Hello with media!', undefined, [mediaId.media_id_string]);
+
+// Reply to a tweet
+await scraper.sendTweet('This is a reply!', '1234567890123456789');
+
+// Like a tweet
+await scraper.likeTweet('1234567890123456789');
+
+// Retweet a tweet
+await scraper.retweet('1234567890123456789');
+
+// Quote tweet
+await scraper.quoteTweet('1234567890123456789', 'Check this out!');
+
+// Quote tweet with media
+const mediaId = await scraper.uploadMedia(mediaBuffer, 'image/jpeg');
+await scraper.quoteTweet('1234567890123456789', 'Check this out!', [mediaId.media_id_string]);
+```
+
+### Following & Relationships
+```ts
+// Follow a user
+await scraper.followUser('elonmusk');
+
+// Check if you're following a user
+const isFollowing = await scraper.isFollowing('elonmusk');
+
+// Upload media (images/videos)
+const mediaBuffer = Buffer.from(/* your media data */);
+const uploadResponse = await scraper.uploadMedia(mediaBuffer, 'image/jpeg'); // or 'video/mp4'
+const mediaId = uploadResponse.media_id_string;
+
+// For videos, the upload process includes processing status checks
+// The uploadMedia method will automatically handle this and return when complete
+```
+
+### Media Upload Details
+When uploading media, the process differs slightly between images and videos:
+
+- **Images**: Single-step upload process
+- **Videos**: Multi-step process including:
+  1. Initialization
+  2. Chunked upload (5MB chunks)
+  3. Finalization
+  4. Processing status checks
+
+```ts
+// Example of handling video upload with processing status
+const videoBuffer = Buffer.from(/* your video data */);
+const uploadResponse = await scraper.uploadMedia(videoBuffer, 'video/mp4');
+
+// uploadResponse may include processing_info for videos
+if (uploadResponse.processing_info) {
+  console.log('Video processing state:', uploadResponse.processing_info.state);
+}
+```
+
+NOTE: FOLLOWING A followUser/isFollowing check has sensitive rate limits. 
+I recommend adding all new follows to a database to give the bot context on who it is following.
