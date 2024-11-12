@@ -242,3 +242,5 @@ export class TwitterGuestAuth implements TwitterAuth {
     );
   }
 }
+
+export { Headers };

@@ -64,6 +64,39 @@ export interface ScraperOptions {
   transform: Partial<FetchTransformOptions>;
 }
 
+// Move interface outside the class
+interface MediaUploadResponse {
+  media_id_string?: string;
+  processing_info?: {
+    state: string;
+    check_after_secs?: number;
+  };
+}
+
+// Add this interface near the top of the file with other interfaces
+interface TweetVariables {
+  tweet_text: string;
+  dark_request: boolean;
+  media?: {
+    media_entities: { media_id: string; }[];
+    possibly_sensitive: boolean;
+  };
+  reply?: {
+    in_reply_to_tweet_id: string;
+    exclude_reply_user_ids: string[];
+  };
+}
+
+// Add this interface near the top of the file with other interfaces
+interface FriendshipResponse {
+  relationship: {
+    source: {
+      following: boolean;
+      // Add other properties as needed
+    };
+  };
+}
+
 /**
  * An interface to Twitter's undocumented API.
  * - Reusing Scraper objects is recommended to minimize the time spent authenticating unnecessarily.
@@ -410,8 +443,71 @@ export class Scraper {
    * @returns
    */
 
-  async sendTweet(text: string, replyToTweetId?: string) {
-    return await createCreateTweetRequest(text, this.auth, replyToTweetId);
+  async sendTweet(text: string, replyToTweetId?: string, mediaIds?: string[]): Promise<Response> {
+    const variables: TweetVariables = {
+      tweet_text: text,
+      dark_request: false,
+      media: mediaIds ? {
+        media_entities: mediaIds.map(id => ({ media_id: id })),
+        possibly_sensitive: false
+      } : undefined
+    };
+
+    if (replyToTweetId) {
+      variables.reply = {
+        in_reply_to_tweet_id: replyToTweetId,
+        exclude_reply_user_ids: []
+      };
+    }
+
+    // Use GraphQL endpoint for tweet creation
+    const response = await requestApi(
+      'https://twitter.com/i/api/graphql/SoVnbfCycZ7fERGCwpZkYA/CreateTweet',
+      this.auth,
+      'POST',
+      {
+        body: JSON.stringify({
+          variables,
+          features: {
+            tweetypie_unmention_optimization_enabled: true,
+            responsive_web_edit_tweet_api_enabled: true,
+            graphql_is_translatable_rweb_tweet_is_translatable_enabled: true,
+            view_counts_everywhere_api_enabled: true,
+            longform_notetweets_consumption_enabled: true,
+            responsive_web_twitter_article_tweet_consumption_enabled: false,
+            tweet_awards_web_tipping_enabled: false,
+            longform_notetweets_rich_text_read_enabled: true,
+            longform_notetweets_inline_media_enabled: true,
+            responsive_web_graphql_exclude_directive_enabled: true,
+            verified_phone_label_enabled: false,
+            freedom_of_speech_not_reach_fetch_enabled: true,
+            standardized_nudges_misinfo: true,
+            tweet_with_visibility_results_prefer_gql_limited_actions_policy_enabled: true,
+            responsive_web_graphql_timeline_navigation_enabled: true,
+            responsive_web_graphql_skip_user_profile_image_extensions_enabled: false,
+            responsive_web_enhance_cards_enabled: false,
+            responsive_web_media_download_video_enabled: false,
+            creator_subscriptions_tweet_preview_api_enabled: true
+          },
+          queryId: "SoVnbfCycZ7fERGCwpZkYA"
+        }),
+        headers: {
+          'Content-Type': 'application/json',
+        }
+      }
+    );
+
+    if (!response.success) {
+      throw response.err;
+    }
+
+    // Create a Response object to maintain compatibility with existing code
+    return new Response(JSON.stringify(response.value), {
+      status: 200,
+      headers: {
+        'Content-Type': 'application/json'
+      }
+    });
   }
 
   /**
@@ -636,7 +732,397 @@ export class Scraper {
     if (!res.success) {
       throw res.err;
     }
-
     return res.value;
+  }
+
+  public async uploadMedia(mediaData: Buffer, mediaType: 'image/jpeg' | 'video/mp4' = 'image/jpeg'): Promise<MediaUploadResponse> {
+    try {
+      const totalBytes = mediaData.length;
+      const isVideo = mediaType === 'video/mp4';
+      const mediaCategory = isVideo ? 'tweet_video' : 'tweet_image';
+      
+      // 1. INIT phase
+      console.log(`Initializing ${isVideo ? 'video' : 'image'} upload...`);
+      const initResponse = await requestApi<MediaUploadResponse>(
+        'https://upload.twitter.com/1.1/media/upload.json',
+        this.auth,
+        'POST',
+        {
+          body: new URLSearchParams({
+            command: 'INIT',
+            total_bytes: totalBytes.toString(),
+            media_type: mediaType,
+            media_category: mediaCategory
+          }).toString(),
+          headers: {
+            'Content-Type': 'application/x-www-form-urlencoded'
+          }
+        }
+      );
+
+      if (!initResponse.success || !initResponse.value.media_id_string) {
+        console.error('Init response:', initResponse);
+        throw new Error('Failed to initialize media upload');
+      }
+
+      const mediaId = initResponse.value.media_id_string;
+      console.log('Media upload initialized, ID:', mediaId);
+
+      // 2. APPEND phase - chunk the media for videos
+      console.log('Appending media data...');
+      const CHUNK_SIZE = 5 * 1024 * 1024; // 5MB chunks for video
+      const chunks = isVideo ? Math.ceil(totalBytes / CHUNK_SIZE) : 1;
+
+      for (let i = 0; i < chunks; i++) {
+        const start = i * CHUNK_SIZE;
+        const end = Math.min(start + CHUNK_SIZE, totalBytes);
+        const chunk = mediaData.slice(start, end);
+
+        const formData = new URLSearchParams();
+        formData.append('command', 'APPEND');
+        formData.append('media_id', mediaId);
+        formData.append('segment_index', i.toString());
+        formData.append('media', chunk.toString('base64'));
+
+        const appendResponse = await requestApi(
+          'https://upload.twitter.com/1.1/media/upload.json',
+          this.auth,
+          'POST',
+          {
+            body: formData.toString(),
+            headers: {
+              'Content-Type': 'application/x-www-form-urlencoded'
+            }
+          }
+        );
+
+        if (!appendResponse.success) {
+          console.error('Append response:', appendResponse);
+          throw new Error(`Failed to append media chunk ${i + 1}/${chunks}`);
+        }
+
+        console.log(`Uploaded chunk ${i + 1}/${chunks}`);
+      }
+
+      // 3. FINALIZE phase
+      console.log('Finalizing media upload...');
+      const finalizeResponse = await requestApi<MediaUploadResponse>(
+        'https://upload.twitter.com/1.1/media/upload.json',
+        this.auth,
+        'POST',
+        {
+          body: new URLSearchParams({
+            command: 'FINALIZE',
+            media_id: mediaId
+          }).toString(),
+          headers: {
+            'Content-Type': 'application/x-www-form-urlencoded'
+          }
+        }
+      );
+
+      if (!finalizeResponse.success) {
+        console.error('Finalize response:', finalizeResponse);
+        throw new Error('Failed to finalize media upload');
+      }
+
+      // 4. STATUS check for videos
+      if (isVideo && finalizeResponse.value.processing_info) {
+        console.log('Checking video processing status...');
+        return await this.checkMediaProcessingStatus(mediaId);
+      }
+
+      console.log('Media upload completed successfully');
+      return finalizeResponse.value;
+    } catch (error) {
+      console.error('Error in uploadMedia:', error);
+      throw error;
+    }
+  }
+
+  // Helper method to check video processing status
+  private async checkMediaProcessingStatus(mediaId: string): Promise<MediaUploadResponse> {
+    const maxAttempts = 10;
+    let attempts = 0;
+
+    while (attempts < maxAttempts) {
+      const statusResponse = await requestApi<MediaUploadResponse>(
+        `https://upload.twitter.com/1.1/media/upload.json?command=STATUS&media_id=${mediaId}`,
+        this.auth,
+        'GET'
+      );
+
+      if (!statusResponse.success) {
+        throw new Error('Failed to check media processing status');
+      }
+
+      const processingInfo = statusResponse.value.processing_info;
+      
+      if (!processingInfo) {
+        return statusResponse.value;
+      }
+
+      if (processingInfo.state === 'succeeded') {
+        return statusResponse.value;
+      }
+
+      if (processingInfo.state === 'failed') {
+        throw new Error('Video processing failed');
+      }
+
+      // Wait for the recommended time before checking again
+      const waitTime = (processingInfo.check_after_secs || 5) * 1000;
+      await new Promise(resolve => setTimeout(resolve, waitTime));
+      attempts++;
+    }
+
+    throw new Error('Video processing timed out');
+  }
+
+  public async likeTweet(tweetId: string): Promise<Response> {
+    const response = await requestApi(
+      'https://twitter.com/i/api/graphql/lI07N6Otwv1PhnEgXILM7A/FavoriteTweet',
+      this.auth,
+      'POST',
+      {
+        body: JSON.stringify({
+          variables: {
+            tweet_id: tweetId
+          },
+          queryId: "lI07N6Otwv1PhnEgXILM7A"
+        }),
+        headers: {
+          'Content-Type': 'application/json'
+        }
+      }
+    );
+
+    if (!response.success) {
+      throw response.err;
+    }
+
+    return new Response(JSON.stringify(response.value), {
+      status: 200,
+      headers: {
+        'Content-Type': 'application/json'
+      }
+    });
+  }
+
+  public async followUser(username: string): Promise<Response> {
+    try {
+      if (!(await this.isLoggedIn())) {
+        throw new Error('Must be logged in to follow users');
+      }
+
+      // Get user ID from username
+      const userIdResult = await getUserIdByScreenName(username, this.auth);
+      
+      if (!userIdResult.success) {
+        throw new Error(`Could not find user with username: ${username}`);
+      }
+
+      const userId = userIdResult.value;
+
+      // Make the follow request
+      const requestBody = {
+        include_profile_interstitial_type: '1',
+        skip_status: 'true',
+        user_id: userId
+      };
+
+      const response = await requestApi(
+        `https://api.twitter.com/1.1/friendships/create.json`,
+        this.auth,
+        'POST',
+        {
+          body: new URLSearchParams(requestBody).toString(),
+          headers: {
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'Referer': `https://twitter.com/${username}`,
+            'X-Twitter-Active-User': 'yes',
+            'X-Twitter-Auth-Type': 'OAuth2Session',
+            'X-Twitter-Client-Language': 'en',
+            'Authorization': `Bearer ${this.token}`
+          }
+        }
+      );
+
+      if (!response.success) {
+        throw response.err;
+      }
+
+      return new Response(JSON.stringify(response.value), {
+        status: 200,
+        headers: {
+          'Content-Type': 'application/json'
+        }
+      });
+      
+    } catch (error) {
+      throw error;
+    }
+  }
+
+  /**
+   * Retweet a tweet
+   * @param tweetId The ID of the tweet to retweet
+   */
+  public async retweet(tweetId: string): Promise<Response> {
+    const response = await requestApi(
+      'https://twitter.com/i/api/graphql/ojPdsZsimiJrUGLR1sjUtA/CreateRetweet',
+      this.auth,
+      'POST',
+      {
+        body: JSON.stringify({
+          variables: {
+            tweet_id: tweetId,
+            dark_request: false
+          },
+          queryId: "ojPdsZsimiJrUGLR1sjUtA"
+        }),
+        headers: {
+          'Content-Type': 'application/json'
+        }
+      }
+    );
+
+    if (!response.success) {
+      throw response.err;
+    }
+
+    return new Response(JSON.stringify(response.value), {
+      status: 200,
+      headers: {
+        'Content-Type': 'application/json'
+      }
+    });
+  }
+
+  /**
+   * Quote tweet another tweet
+   * @param tweetId The ID of the tweet to quote
+   * @param text The text content of your quote tweet
+   * @param mediaIds Optional array of media IDs to attach to the quote tweet
+   */
+  public async quoteTweet(
+    tweetId: string, 
+    text: string,
+    mediaIds?: string[]
+  ): Promise<Response> {
+    // Changed the URL format to match Twitter's expected format
+    const attachmentUrl = `https://twitter.com/twitter/status/${tweetId}`;
+
+    const variables = {
+      tweet_text: text,
+      dark_request: false,
+      attachment_url: attachmentUrl,
+      media: mediaIds ? {
+        media_entities: mediaIds.map(id => ({ media_id: id })),
+        possibly_sensitive: false
+      } : undefined,
+      semantic_annotation_ids: [] // Added this line
+    };
+
+    const response = await requestApi(
+      'https://twitter.com/i/api/graphql/SoVnbfCycZ7fERGCwpZkYA/CreateTweet',
+      this.auth,
+      'POST',
+      {
+        body: JSON.stringify({
+          variables,
+          features: {
+            tweetypie_unmention_optimization_enabled: true,
+            responsive_web_edit_tweet_api_enabled: true,
+            graphql_is_translatable_rweb_tweet_is_translatable_enabled: true,
+            view_counts_everywhere_api_enabled: true,
+            longform_notetweets_consumption_enabled: true,
+            responsive_web_twitter_article_tweet_consumption_enabled: false,
+            tweet_awards_web_tipping_enabled: false,
+            longform_notetweets_rich_text_read_enabled: true,
+            longform_notetweets_inline_media_enabled: true,
+            responsive_web_graphql_exclude_directive_enabled: true,
+            verified_phone_label_enabled: false,
+            freedom_of_speech_not_reach_fetch_enabled: true,
+            standardized_nudges_misinfo: true,
+            tweet_with_visibility_results_prefer_gql_limited_actions_policy_enabled: true,
+            responsive_web_graphql_timeline_navigation_enabled: true,
+            responsive_web_graphql_skip_user_profile_image_extensions_enabled: false,
+            responsive_web_enhance_cards_enabled: false,
+            responsive_web_media_download_video_enabled: false
+          },
+          queryId: "SoVnbfCycZ7fERGCwpZkYA"
+        }),
+        headers: {
+          'Content-Type': 'application/json',
+          'Referer': `https://twitter.com/twitter/status/${tweetId}` // Added this line
+        }
+      }
+    );
+
+    if (!response.success) {
+      throw response.err;
+    }
+
+    return new Response(JSON.stringify(response.value), {
+      status: 200,
+      headers: {
+        'Content-Type': 'application/json'
+      }
+    });
+  }
+
+  /**
+   * Check if the current logged-in user is following a specific user
+   * @param username The username to check following status for
+   * @returns Promise<boolean> True if following the user, false otherwise
+   */
+  public async isFollowing(username: string): Promise<boolean> {
+    try {
+      if (!(await this.isLoggedIn())) {
+        throw new Error('Must be logged in to check following status');
+      }
+
+      // Get user ID from username
+      const userIdResult = await getUserIdByScreenName(username, this.auth);
+      if (!userIdResult.success) {
+        throw new Error(`Could not find user with username: ${username}`);
+      }
+      const userId = userIdResult.value;
+
+      // Get the logged-in user's ID
+      const myUsername = process.env.TWITTER_USERNAME;
+      const myUserIdResult = await getUserIdByScreenName(myUsername!, this.auth);
+      if (!myUserIdResult.success) {
+        throw new Error('Could not get logged in user ID');
+      }
+      const myUserId = myUserIdResult.value;
+
+      // Check friendship status
+      const params = new URLSearchParams({
+        source_id: myUserId,
+        target_id: userId
+      });
+
+      const response = await requestApi<FriendshipResponse>(
+        `https://api.twitter.com/1.1/friendships/show.json?${params.toString()}`,
+        this.auth,
+        'GET',
+        {
+          headers: {
+            'Content-Type': 'application/json'
+          }
+        }
+      );
+
+      if (!response.success) {
+        throw response.err;
+      }
+
+      return response.value.relationship.source.following === true;
+
+    } catch (error) {
+      throw error;
+    }
   }
 }

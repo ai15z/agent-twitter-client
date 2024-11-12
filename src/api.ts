@@ -1,6 +1,7 @@
 import { TwitterAuth } from './auth';
 import { ApiError } from './errors';
 import { Platform, PlatformExtensions } from './platform';
+import { platform } from './platform/node';
 import { updateCookieJar } from './requests';
 import { Headers } from 'headers-polyfill';
 
@@ -50,21 +51,44 @@ export async function requestApi<T>(
   url: string,
   auth: TwitterAuth,
   method: 'GET' | 'POST' = 'GET',
-  platform: PlatformExtensions = new Platform(),
+  options: {
+    body?: Buffer | string | FormData;
+    headers?: Record<string, string>;
+  } = {}
 ): Promise<RequestApiResult<T>> {
-  const headers = new Headers();
+  const headers = new Headers(options.headers || {});
   await auth.installTo(headers, url);
   await platform.randomizeCiphers();
 
   let res: Response;
   do {
     try {
-      res = await auth.fetch(url, {
+      const requestOptions: RequestInit = {
         method,
         headers,
         credentials: 'include',
-      });
+      };
+
+      // Handle body based on type
+      if (options.body) {
+        if (options.body instanceof FormData) {
+          // For FormData, let the browser handle the Content-Type
+          requestOptions.body = options.body;
+        } else if (headers.get('Content-Type') === 'application/octet-stream') {
+          // For binary data (like images)
+          requestOptions.body = options.body;
+        } else if (headers.get('Content-Type') === 'application/json') {
+          // For JSON data
+          requestOptions.body = typeof options.body === 'string' ? options.body : JSON.stringify(options.body);
+        } else {
+          // Default handling
+          requestOptions.body = options.body;
+        }
+      }
+
+      res = await auth.fetch(url, requestOptions);
     } catch (err) {
+      console.error('Request failed:', err);
       if (!(err instanceof Error)) {
         throw err;
       }
@@ -77,38 +101,43 @@ export async function requestApi<T>(
 
     await updateCookieJar(auth.cookieJar(), res.headers);
 
+    // Handle rate limiting
     if (res.status === 429) {
-      /*
-      Known headers at this point:
-      - x-rate-limit-limit: Maximum number of requests per time period?
-      - x-rate-limit-reset: UNIX timestamp when the current rate limit will be reset.
-      - x-rate-limit-remaining: Number of requests remaining in current time period?
-      */
       const xRateLimitRemaining = res.headers.get('x-rate-limit-remaining');
       const xRateLimitReset = res.headers.get('x-rate-limit-reset');
       if (xRateLimitRemaining == '0' && xRateLimitReset) {
         const currentTime = new Date().valueOf() / 1000;
         const timeDeltaMs = 1000 * (parseInt(xRateLimitReset) - currentTime);
-
-        // I have seen this block for 800s (~13 *minutes*)
         await new Promise((resolve) => setTimeout(resolve, timeDeltaMs));
       }
     }
   } while (res.status === 429);
 
   if (!res.ok) {
+    const errorText = await res.text();
+    console.error('API Error:', {
+      status: res.status,
+      statusText: res.statusText,
+      body: errorText
+    });
     return {
       success: false,
       err: await ApiError.fromResponse(res),
     };
   }
 
-  const value: T = await res.json();
-  if (res.headers.get('x-rate-limit-incoming') == '0') {
-    auth.deleteToken();
+  try {
+    const value: T = await res.json();
+    if (res.headers.get('x-rate-limit-incoming') == '0') {
+      auth.deleteToken();
+    }
     return { success: true, value };
-  } else {
-    return { success: true, value };
+  } catch (error) {
+    console.error('Error parsing response:', error);
+    return {
+      success: false,
+      err: new Error('Failed to parse response as JSON'),
+    };
   }
 }
 
